@@ -27,3 +27,13 @@ FRONTMATTER_INDEX_DEBOUNCE = 5.0
 # Rate limiting (requests per minute) -- track in-memory, enforce per-token
 RATE_LIMIT_READ = 100
 RATE_LIMIT_WRITE = 30
+
+# Semantic search (optional -- requires [semantic] extras)
+SEMANTIC_SEARCH_ENABLED = os.environ.get("SEMANTIC_SEARCH_ENABLED", "false").lower() == "true"
+SEMANTIC_CACHE_PATH = Path(os.environ.get("SEMANTIC_CACHE_PATH", os.path.expanduser("~/.cache/obsidian-web-mcp")))
+EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "paraphrase-multilingual-mpnet-base-v2")
+BM25_WEIGHT = float(os.environ.get("BM25_WEIGHT", "0.4"))
+VECTOR_WEIGHT = float(os.environ.get("VECTOR_WEIGHT", "0.6"))
+CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", "600"))
+CHUNK_OVERLAP = int(os.environ.get("CHUNK_OVERLAP", "80"))
+MIN_RELEVANCE_SCORE = float(os.environ.get("MIN_RELEVANCE_SCORE", "0.3"))
