@@ -23,6 +23,7 @@ class FrontmatterIndex:
         self._observer: Observer | None = None
         self._debounce_timer: threading.Timer | None = None
         self._pending_paths: set[str] = set()
+        self._change_callbacks: list = []
 
     def start(self) -> None:
         """Walk all .md files, parse frontmatter, and start watching for changes."""
@@ -62,6 +63,14 @@ class FrontmatterIndex:
     def file_count(self) -> int:
         with self._lock:
             return len(self._index)
+
+    def on_change(self, callback) -> None:
+        """Register a callback to be called with changed relative paths after flush.
+
+        Callback signature: callback(changed_paths: list[str]) -> None
+        Called from the debounce timer thread.
+        """
+        self._change_callbacks.append(callback)
 
     def search_by_field(
         self,
@@ -130,9 +139,11 @@ class FrontmatterIndex:
             self._pending_paths.clear()
             self._debounce_timer = None
 
+        changed_rel_paths: list[str] = []
         for abs_path_str in paths:
             abs_path = Path(abs_path_str)
             rel = str(abs_path.relative_to(config.VAULT_PATH))
+            changed_rel_paths.append(rel)
             if abs_path.exists():
                 fm = self._parse_frontmatter(abs_path)
                 with self._lock:
@@ -143,6 +154,13 @@ class FrontmatterIndex:
             else:
                 with self._lock:
                     self._index.pop(rel, None)
+
+        # Notify registered callbacks
+        for callback in self._change_callbacks:
+            try:
+                callback(changed_rel_paths)
+            except Exception:
+                logger.warning("Change callback failed", exc_info=True)
 
 
 class _VaultEventHandler(FileSystemEventHandler):

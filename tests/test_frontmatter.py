@@ -72,3 +72,28 @@ def test_frontmatter_merge(vault_dir):
     assert post2.metadata["status"] == "active"  # preserved
     assert post2.metadata["new_field"] == "new_value"  # added
     assert original_body.strip() in post2.content  # body preserved
+
+
+def test_on_change_callback_fires(vault_dir):
+    """Registered callback is called with changed paths after flush."""
+    from obsidian_vault_mcp.frontmatter_index import FrontmatterIndex
+
+    index = FrontmatterIndex()
+    index.start()
+
+    changed_paths: list[list[str]] = []
+    index.on_change(lambda paths: changed_paths.append(paths))
+
+    # Create a new file to trigger the watcher
+    new_file = vault_dir / "callback-test.md"
+    new_file.write_text("---\nstatus: test\n---\n\nCallback test.\n")
+
+    # Wait for debounce (5s) + processing time
+    import time
+    time.sleep(7)
+
+    index.stop()
+
+    assert len(changed_paths) >= 1
+    all_paths = [p for batch in changed_paths for p in batch]
+    assert "callback-test.md" in all_paths
