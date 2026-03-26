@@ -64,11 +64,12 @@ src/obsidian_vault_mcp/
 
 ### Splitting Logic
 
-1. Parse frontmatter via `python-frontmatter`
+1. Parse frontmatter via `python-frontmatter` (already a project dependency — no optional import guard needed)
 2. Split on Markdown headers (H1/H2/H3) to create section-based chunks
 3. If a section exceeds ~800 tokens, split further on paragraph breaks (double newline)
 4. Keep code blocks intact — never split mid-fence
 5. Target 400-800 tokens per chunk, ~80 token overlap between consecutive chunks within the same section
+6. Token counting uses a rough chars/4 heuristic (no tokenizer dependency needed — chunk boundaries are approximate by nature)
 
 ### Chunk Metadata
 
@@ -79,7 +80,7 @@ class ChunkMetadata(BaseModel):
     chunk_index: int       # Position within the note
     total_chunks: int      # How many chunks this note produced
     tags: list[str]        # From frontmatter
-    content_hash: str      # xxHash of source file (for change detection)
+    content_hash: str      # Hash of source file (for change detection)
 ```
 
 ### Context Prefix
@@ -108,7 +109,7 @@ Prepended to each chunk before embedding (not stored, used for embedding quality
 Triggered on first startup (no existing index) or `vault_reindex(full=True)`:
 
 1. Walk all `.md` files via `vault.py`'s safe path resolution (respects `EXCLUDED_DIRS`)
-2. Chunk each file, compute xxHash of file content
+2. Chunk each file, compute `hashlib.sha256` hash of file content
 3. Embed all chunks via sentence-transformers (batched, batch size 64)
 4. Store in ChromaDB with metadata, build BM25 index from chunk texts
 5. Write `manifest.json`
@@ -120,7 +121,7 @@ Triggered by watchdog file change events:
 
 1. Existing `FrontmatterIndex` watchdog detects `.md` file change
 2. Debounce (same 5-second window as frontmatter index)
-3. Compare file's current xxHash against `manifest.json`
+3. Compare file's current hash against `manifest.json`
 4. If changed: delete old chunks from ChromaDB (filter by path), re-chunk, re-embed, re-insert
 5. If deleted: remove from ChromaDB and BM25
 6. Rebuild BM25 index from ChromaDB's stored texts (<100ms for 5K notes)
@@ -133,13 +134,17 @@ Triggered by watchdog file change events:
 
 ### Watchdog Integration
 
-Extend `FrontmatterIndex` with a callback hook rather than duplicating the watcher:
+**Prerequisite:** `FrontmatterIndex` currently has no callback mechanism. Add a change callback list to `FrontmatterIndex`:
 
-```python
-frontmatter_index.on_change(engine.handle_file_change)
-```
+1. Add `self._change_callbacks: list[Callable[[list[str]], None]] = []` to `__init__`
+2. Add public method `on_change(callback: Callable[[list[str]], None])` that appends to the list
+3. At the end of `_flush_pending()`, after processing all paths, call each callback with the list of changed relative paths
 
-One watcher, one debounce timer, consistent behavior.
+This is a minimal, backward-compatible change — existing behavior is unaffected when no callbacks are registered. The retrieval engine's `handle_file_change` callback receives the list of changed paths and performs incremental re-indexing.
+
+### Thread Safety
+
+`FrontmatterIndex._flush_pending()` runs on a `threading.Timer` thread, so `engine.handle_file_change` will be called from a background thread while search queries arrive on the asyncio event loop. ChromaDB handles its own internal thread safety. The BM25 index rebuild must be protected with a `threading.Lock` in the engine to prevent concurrent read/write during rebuilds.
 
 ---
 
@@ -147,17 +152,16 @@ One watcher, one debounce timer, consistent behavior.
 
 ### Pipeline Steps
 
-1. **Vector search** — embed the query, query ChromaDB for top `3 * max_results` candidates with cosine similarity
-2. **BM25 search** — tokenize the query, score against BM25 index, take top `3 * max_results` candidates
+1. **Vector search** — embed the query, query ChromaDB for top `3 * max_results` candidates with cosine similarity. Apply `filter_tags` and `filter_folder` as ChromaDB metadata filters (pre-filtering).
+2. **BM25 search** — tokenize the query, score against BM25 index, take top `6 * max_results` candidates (over-fetch to compensate for post-filtering). Apply `filter_tags` and `filter_folder` as post-filters on the results.
 3. **Reciprocal Rank Fusion** — merge both result sets:
    ```
    score(doc) = (vector_weight / (k + vector_rank)) + (bm25_weight / (k + bm25_rank))
    ```
-   Default weights: 0.6 vector / 0.4 BM25, k=60
-4. **Filter** — apply `filter_tags` and `filter_folder` (ChromaDB metadata filter on vector side, post-filter on BM25)
-5. **Score threshold** — drop results below `min_score` (default 0.3)
-6. **Deduplicate** — if multiple chunks from same note, keep highest-scoring (unless `return_full_notes=True`)
-7. **Return** — top `max_results` as `SearchResult` objects
+   Default weights: 0.6 vector / 0.4 BM25, k=60. Normalize scores to 0.0-1.0 range by dividing by the theoretical max score (vector_weight/k+1 + bm25_weight/k+1) so that `min_score` thresholds are meaningful.
+4. **Score threshold** — drop results below `min_score` (default 0.3)
+5. **Deduplicate** — if multiple chunks from same note, keep highest-scoring (unless `return_full_notes=True`)
+6. **Return** — top `max_results` as `SearchResult` objects
 
 ### `return_full_notes` Behavior
 
@@ -166,38 +170,62 @@ One watcher, one debounce timer, consistent behavior.
 
 ### Tool Schema
 
+Follows the existing codebase pattern: synchronous `def`, returns `str` (JSON-serialized), uses Pydantic input model for validation.
+
 ```python
-async def vault_semantic_search(
-    query: str,                       # Natural language query
-    max_results: int = 10,            # Max results to return
-    min_score: float = 0.3,           # Minimum relevance threshold
-    filter_tags: list[str] = [],      # Only notes with these tags
-    filter_folder: str = "",          # Restrict to folder prefix
-    return_full_notes: bool = False,  # Return full note content
-) -> list[SearchResult]
+# In tools/semantic_search.py
+def vault_semantic_search_impl(
+    query: str,
+    max_results: int = 10,
+    min_score: float = 0.3,
+    filter_tags: list[str] | None = None,
+    filter_folder: str = "",
+    return_full_notes: bool = False,
+) -> str:
+    """Returns JSON string with results list or error."""
+
+# In server.py — registered with @mcp.tool() like existing tools
+@mcp.tool(
+    name="vault_semantic_search",
+    description="Hybrid semantic + keyword search across the vault. Combines vector similarity with BM25 keyword matching. Returns ranked results with relevance scores.",
+    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+)
+def vault_semantic_search(
+    query: str,
+    max_results: int = 10,
+    min_score: float = 0.3,
+    filter_tags: list[str] | None = None,
+    filter_folder: str = "",
+    return_full_notes: bool = False,
+) -> str:
+    inp = VaultSemanticSearchInput(...)
+    return _vault_semantic_search(inp.query, inp.max_results, ...)
 ```
 
 ### Return Schema
+
+Serialized to JSON string (consistent with all existing tools):
 
 ```python
 class SearchResult(BaseModel):
     path: str              # Relative vault path
     section: str | None    # Section heading (None if return_full_notes)
     content: str           # Chunk text or full note content
-    score: float           # 0.0-1.0 fused relevance score
+    score: float           # 0.0-1.0 normalized fused relevance score
     tags: list[str]        # Frontmatter tags
 ```
 
 ### `vault_reindex` Tool
 
 ```python
-async def vault_reindex(
-    full: bool = False,    # Full rebuild vs incremental delta
-) -> ReindexResult
+# Same sync def + str return pattern
+def vault_reindex(full: bool = False) -> str:
+    """Returns JSON string with reindex stats."""
 
 class ReindexResult(BaseModel):
     files_indexed: int
     chunks_created: int
+    files_skipped: int     # Files that failed to parse/chunk/embed
     duration_seconds: float
 ```
 
@@ -208,8 +236,38 @@ class ReindexResult(BaseModel):
 ### Feature Gate
 
 - `SEMANTIC_SEARCH_ENABLED` env var (default `false`)
-- When `false`: tools not registered, no imports, zero overhead
+- When `false`: semantic tools not registered, no imports, zero overhead
 - When `true`: tools registered, but model/index loading deferred to first use
+
+### Tool Registration
+
+Conditional registration in `server.py`, following the existing import + wrapper pattern:
+
+```python
+# At module level, after existing tool registrations
+if config.SEMANTIC_SEARCH_ENABLED:
+    from .tools.semantic_search import vault_semantic_search_impl as _vault_semantic_search
+    from .tools.admin import vault_reindex_impl as _vault_reindex
+    from .models import VaultSemanticSearchInput, VaultReindexInput
+
+    @mcp.tool(
+        name="vault_semantic_search",
+        description="...",
+        annotations={...},
+    )
+    def vault_semantic_search(...) -> str:
+        inp = VaultSemanticSearchInput(...)
+        return _vault_semantic_search(...)
+
+    @mcp.tool(
+        name="vault_reindex",
+        description="...",
+        annotations={...},
+    )
+    def vault_reindex(...) -> str:
+        inp = VaultReindexInput(...)
+        return _vault_reindex(...)
+```
 
 ### Lazy Initialization
 
@@ -223,29 +281,44 @@ class ReindexResult(BaseModel):
 
 ### Lifespan Changes
 
+Matches the existing `start()`/`stop()` + yield state dict pattern in `server.py`:
+
 ```python
-# In server.py lifespan
-async with frontmatter_index:
-    if settings.semantic_search_enabled:
-        engine = RetrievalEngine(settings)
+@asynccontextmanager
+async def lifespan(server):
+    logger.info(f"Starting vault MCP server. Vault: {VAULT_PATH}")
+    frontmatter_index.start()
+    logger.info(f"Frontmatter index built: {frontmatter_index.file_count} files indexed")
+
+    if config.SEMANTIC_SEARCH_ENABLED:
+        engine = RetrievalEngine()
         frontmatter_index.on_change(engine.handle_file_change)
-    yield
+    else:
+        engine = None
+
+    yield {"frontmatter_index": frontmatter_index, "retrieval_engine": engine}
+
+    if engine is not None:
+        engine.shutdown()
+    frontmatter_index.stop()
+    logger.info("Vault MCP server shut down.")
 ```
 
 ### Configuration
 
-New env vars added to `config.py`:
+New module-level constants added to `config.py` (matching existing pattern of bare constants, not a settings object):
 
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `SEMANTIC_SEARCH_ENABLED` | `false` | Feature gate |
-| `SEMANTIC_CACHE_PATH` | `~/.cache/obsidian-web-mcp` | Index storage location |
-| `EMBEDDING_MODEL` | `paraphrase-multilingual-mpnet-base-v2` | Embedding model name |
-| `BM25_WEIGHT` | `0.4` | BM25 weight in RRF fusion |
-| `VECTOR_WEIGHT` | `0.6` | Vector weight in RRF fusion |
-| `CHUNK_SIZE` | `600` | Target tokens per chunk |
-| `CHUNK_OVERLAP` | `80` | Overlap tokens between chunks |
-| `MIN_RELEVANCE_SCORE` | `0.3` | Default minimum score threshold |
+```python
+# Semantic search (optional — requires [semantic] extras)
+SEMANTIC_SEARCH_ENABLED = os.environ.get("SEMANTIC_SEARCH_ENABLED", "false").lower() == "true"
+SEMANTIC_CACHE_PATH = Path(os.environ.get("SEMANTIC_CACHE_PATH", os.path.expanduser("~/.cache/obsidian-web-mcp")))
+EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "paraphrase-multilingual-mpnet-base-v2")
+BM25_WEIGHT = float(os.environ.get("BM25_WEIGHT", "0.4"))
+VECTOR_WEIGHT = float(os.environ.get("VECTOR_WEIGHT", "0.6"))
+CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE", "600"))        # Approximate tokens (chars/4)
+CHUNK_OVERLAP = int(os.environ.get("CHUNK_OVERLAP", "80"))    # Approximate tokens (chars/4)
+MIN_RELEVANCE_SCORE = float(os.environ.get("MIN_RELEVANCE_SCORE", "0.3"))
+```
 
 ---
 
@@ -255,13 +328,17 @@ New env vars added to `config.py`:
 
 If sentence-transformers fails to load (OOM, missing model, etc.), log the error and mark the engine as `unavailable`. Subsequent calls return: `{"error": "Semantic search unavailable: <reason>. Use vault_search for keyword search."}`. Server stays up, existing tools unaffected.
 
+### Missing Dependencies
+
+If `SEMANTIC_SEARCH_ENABLED=true` but the `[semantic]` extras are not installed, catch `ImportError` at registration time, log a clear error ("semantic search enabled but dependencies not installed — run pip install obsidian-vault-mcp[semantic]"), and skip tool registration. Server starts normally with only the base tools.
+
 ### Index Corruption
 
 If ChromaDB or BM25 pickle fails to load, delete the cache and trigger a full rebuild. If rebuild also fails, mark engine as `unavailable`.
 
 ### Partial Indexing Failures
 
-Skip individual files that fail to parse/chunk/embed, log warnings. Track skip count and surface in `vault_reindex` results.
+Skip individual files that fail to parse/chunk/embed, log warnings. Track skip count and surface in `vault_reindex` results via `files_skipped` field.
 
 ### Search-Time Fallbacks
 
@@ -283,7 +360,7 @@ Skip individual files that fail to parse/chunk/embed, log warnings. Track skip c
 
 - **Chunker**: markdown splitting respects headers, code fences intact, overlap correct, metadata extraction
 - **BM25**: index build, serialize/deserialize, query returns ranked results
-- **Search fusion**: RRF merging with known scores, deduplication, score threshold filtering
+- **Search fusion**: RRF merging with known scores, deduplication, score threshold filtering, normalization produces 0-1 range
 - **Models**: Pydantic schema validation
 
 ### Integration Tests (`tests/test_semantic_search.py`)
@@ -320,13 +397,14 @@ semantic = [
     "chromadb>=0.5.0",
     "sentence-transformers>=3.0.0",
     "rank-bm25>=0.2.2",
-    "xxhash>=3.0.0",
 ]
 ```
 
+Note: `xxhash` dropped in favor of `hashlib.sha256` (stdlib) — files are typically <100 KB, so the performance difference is negligible and it avoids an extra compiled dependency.
+
 Install: `pip install obsidian-vault-mcp[semantic]`
 
-If `SEMANTIC_SEARCH_ENABLED=true` but packages not installed, engine logs error and marks itself unavailable.
+If `SEMANTIC_SEARCH_ENABLED=true` but packages not installed, engine logs error and skips tool registration.
 
 ### Disk Footprint
 
