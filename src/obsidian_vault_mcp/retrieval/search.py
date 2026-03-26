@@ -1,9 +1,5 @@
 """Hybrid search with Reciprocal Rank Fusion."""
 
-import logging
-
-logger = logging.getLogger(__name__)
-
 
 def reciprocal_rank_fusion(
     vector_results: list[tuple[str, float]],

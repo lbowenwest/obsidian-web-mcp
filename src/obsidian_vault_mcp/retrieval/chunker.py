@@ -7,6 +7,9 @@ import frontmatter
 
 from .models import Chunk, ChunkMetadata
 
+# Shared with indexer — keep in sync
+_HASH_PREFIX_LEN = 16
+
 
 def _estimate_tokens(text: str) -> int:
     """Rough token estimate: chars / 4."""
@@ -93,7 +96,7 @@ def chunk_markdown(
     if not body or not body.strip():
         return []
 
-    content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+    content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()[:_HASH_PREFIX_LEN]
 
     sections = _extract_sections(body)
     if not sections:

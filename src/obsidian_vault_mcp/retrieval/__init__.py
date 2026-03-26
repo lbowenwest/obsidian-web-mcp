@@ -64,7 +64,8 @@ class RetrievalEngine:
             })
 
         try:
-            # 1. Vector search
+            from .indexer import CHUNK_ID_SEPARATOR
+
             query_embedding = self._embedder.encode([query])[0]
             vector_results = self._indexer.vector_search(
                 query_embedding, n_results=3 * max_results,
@@ -72,17 +73,13 @@ class RetrievalEngine:
             )
             vector_ranked = [(cid, sim) for cid, sim, _ in vector_results]
 
-            # 2. BM25 search
             bm25_results = self._indexer.bm25.query(query, top_k=6 * max_results)
-
-            # Post-filter BM25 by folder if specified
             if filter_folder:
                 bm25_results = [
                     (cid, s) for cid, s in bm25_results
-                    if cid.split("::")[0].startswith(filter_folder)
+                    if cid.split(CHUNK_ID_SEPARATOR)[0].startswith(filter_folder)
                 ]
 
-            # 3. RRF fusion
             fused = reciprocal_rank_fusion(
                 vector_ranked, bm25_results,
                 vector_weight=config.VECTOR_WEIGHT,
@@ -90,45 +87,45 @@ class RetrievalEngine:
                 k=60,
             )
 
-            # 4. Score threshold
             fused = [(cid, s) for cid, s in fused if s >= min_score]
 
-            # 5. Look up metadata and build results
-            results_with_meta: list[tuple[str, str, float, dict]] = []
-            for chunk_id, score in fused:
-                path = chunk_id.rsplit("::", 1)[0]
-                meta = self._get_chunk_metadata(chunk_id)
-                if meta:
-                    results_with_meta.append((chunk_id, path, score, meta))
+            # Attach path from chunk_id
+            results_with_path = [
+                (cid, cid.rsplit(CHUNK_ID_SEPARATOR, 1)[0], score)
+                for cid, score in fused
+            ]
 
-            # 6. Deduplicate
             if not return_full_notes:
-                deduped = deduplicate_by_path(
-                    [(cid, path, score) for cid, path, score, _ in results_with_meta]
-                )
-                meta_lookup = {cid: meta for cid, _, _, meta in results_with_meta}
-                results_with_meta = [
-                    (cid, path, score, meta_lookup.get(cid, {}))
-                    for cid, path, score in deduped
-                ]
+                results_with_path = deduplicate_by_path(results_with_path)
 
-            # Limit results
-            results_with_meta = results_with_meta[:max_results]
+            results_with_path = results_with_path[:max_results]
 
-            # 7. Build output
+            if not results_with_path:
+                return json.dumps({"results": [], "total": 0})
+
+            # Batch retrieve all chunk data at once (avoids N+1)
+            chunk_ids = [cid for cid, _, _ in results_with_path]
+            chunk_data = self._indexer.get_chunks(chunk_ids)
+
             search_results = []
-            for chunk_id, path, score, meta in results_with_meta:
+            file_cache: dict[str, str] = {}
+            for chunk_id, path, score in results_with_path:
+                data = chunk_data.get(chunk_id)
+                if not data:
+                    continue
+                doc_text, meta = data
+
                 if return_full_notes:
-                    try:
-                        content, _ = read_file(path)
-                        section = None
-                    except Exception:
-                        continue
+                    if path not in file_cache:
+                        try:
+                            file_cache[path], _ = read_file(path)
+                        except Exception:
+                            continue
+                    content = file_cache[path]
+                    section = None
                 else:
-                    content = self._get_chunk_document(chunk_id) or ""
-                    section = meta.get("section", None)
-                    if section == "":
-                        section = None
+                    content = doc_text
+                    section = meta.get("section") or None
 
                 tags = json.loads(meta.get("tags", "[]"))
 
@@ -159,10 +156,10 @@ class RetrievalEngine:
             if full:
                 result = self._indexer.full_index()
             else:
-                self._indexer._sync_delta()
+                self._indexer.sync_delta()
                 result = ReindexResult(
                     files_indexed=0,
-                    chunks_created=self._indexer._collection.count() if self._indexer._collection else 0,
+                    chunks_created=self._indexer.chunk_count(),
                     files_skipped=0,
                     duration_seconds=0,
                 )
@@ -184,23 +181,3 @@ class RetrievalEngine:
         """Clean up resources."""
         logger.info("Retrieval engine shutting down")
         self._initialized = False
-
-    def _get_chunk_metadata(self, chunk_id: str) -> dict | None:
-        """Look up chunk metadata from ChromaDB."""
-        try:
-            result = self._indexer._collection.get(ids=[chunk_id], include=["metadatas"])
-            if result["metadatas"]:
-                return result["metadatas"][0]
-        except Exception:
-            pass
-        return None
-
-    def _get_chunk_document(self, chunk_id: str) -> str | None:
-        """Look up chunk text from ChromaDB."""
-        try:
-            result = self._indexer._collection.get(ids=[chunk_id], include=["documents"])
-            if result["documents"]:
-                return result["documents"][0]
-        except Exception:
-            pass
-        return None

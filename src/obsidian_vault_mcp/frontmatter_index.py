@@ -3,6 +3,7 @@
 import logging
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import frontmatter
@@ -23,7 +24,7 @@ class FrontmatterIndex:
         self._observer: Observer | None = None
         self._debounce_timer: threading.Timer | None = None
         self._pending_paths: set[str] = set()
-        self._change_callbacks: list = []
+        self._change_callbacks: list[Callable[[list[str]], None]] = []
 
     def start(self) -> None:
         """Walk all .md files, parse frontmatter, and start watching for changes."""
