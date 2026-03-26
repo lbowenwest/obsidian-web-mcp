@@ -20,6 +20,7 @@ semantic = [
     "chromadb>=0.5.0",
     "sentence-transformers>=3.0.0",
     "rank-bm25>=0.2.2",
+    "torch>=2.0.0",
 ]
 
 [project.scripts]
@@ -31,6 +32,16 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/obsidian_vault_mcp"]
+
+[tool.uv]
+# Use PyTorch CPU-only index to avoid pulling ~2GB of NVIDIA CUDA libraries
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
 
 [tool.pytest.ini_options]
 markers = ["slow: marks tests as slow (deselect with '-m \"not slow\"')"]
