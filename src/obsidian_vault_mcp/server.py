@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
+from . import config
 from .config import VAULT_MCP_PORT, VAULT_MCP_TOKEN, VAULT_PATH
 from .frontmatter_index import FrontmatterIndex
 
@@ -23,11 +24,35 @@ frontmatter_index = FrontmatterIndex()
 
 @asynccontextmanager
 async def lifespan(server):
-    """Start frontmatter index on server startup, stop on shutdown."""
+    """Start frontmatter index and optional retrieval engine on startup."""
     logger.info(f"Starting vault MCP server. Vault: {VAULT_PATH}")
     frontmatter_index.start()
     logger.info(f"Frontmatter index built: {frontmatter_index.file_count} files indexed")
-    yield {"frontmatter_index": frontmatter_index}
+
+    engine = None
+    if config.SEMANTIC_SEARCH_ENABLED:
+        try:
+            from .retrieval import RetrievalEngine
+            from .tools.semantic_search import set_engine as set_search_engine
+            from .tools.admin import set_engine as set_admin_engine
+
+            engine = RetrievalEngine()
+            set_search_engine(engine)
+            set_admin_engine(engine)
+            frontmatter_index.on_change(engine.handle_file_change)
+            logger.info("Semantic search enabled")
+        except ImportError:
+            logger.error(
+                "Semantic search enabled but dependencies not installed. "
+                "Run: pip install obsidian-vault-mcp[semantic]"
+            )
+        except Exception as e:
+            logger.error("Failed to set up semantic search: %s", e)
+
+    yield {"frontmatter_index": frontmatter_index, "retrieval_engine": engine}
+
+    if engine is not None:
+        engine.shutdown()
     frontmatter_index.stop()
     logger.info("Vault MCP server shut down.")
 
@@ -186,6 +211,57 @@ def vault_delete(path: str, confirm: bool = False) -> str:
     """Delete a file (move to .trash/)."""
     inp = VaultDeleteInput(path=path, confirm=confirm)
     return _vault_delete(inp.path, inp.confirm)
+
+
+# --- Conditional semantic search tools ---
+
+if config.SEMANTIC_SEARCH_ENABLED:
+    try:
+        from .tools.semantic_search import vault_semantic_search_impl as _vault_semantic_search
+        from .tools.admin import vault_reindex_impl as _vault_reindex
+        from .models import VaultSemanticSearchInput, VaultReindexInput
+
+        @mcp.tool(
+            name="vault_semantic_search",
+            description="Hybrid semantic + keyword search across the vault. Combines vector similarity with BM25 keyword matching using Reciprocal Rank Fusion. Returns ranked results with relevance scores. Use this for natural language queries instead of vault_search.",
+            annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        )
+        def vault_semantic_search(
+            query: str,
+            max_results: int = 10,
+            min_score: float = 0.3,
+            filter_tags: list[str] | None = None,
+            filter_folder: str = "",
+            return_full_notes: bool = False,
+        ) -> str:
+            """Hybrid semantic + keyword search."""
+            inp = VaultSemanticSearchInput(
+                query=query, max_results=max_results, min_score=min_score,
+                filter_tags=filter_tags, filter_folder=filter_folder,
+                return_full_notes=return_full_notes,
+            )
+            return _vault_semantic_search(
+                inp.query, inp.max_results, inp.min_score,
+                inp.filter_tags, inp.filter_folder, inp.return_full_notes,
+            )
+
+        @mcp.tool(
+            name="vault_reindex",
+            description="Rebuild the semantic search index. Use full=true to rebuild from scratch, or full=false for incremental sync.",
+            annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+        )
+        def vault_reindex(full: bool = False) -> str:
+            """Trigger reindexing."""
+            inp = VaultReindexInput(full=full)
+            return _vault_reindex(inp.full)
+
+        logger.info("Semantic search tools registered")
+
+    except ImportError:
+        logger.warning(
+            "Semantic search enabled but dependencies not installed. "
+            "Run: pip install obsidian-vault-mcp[semantic]"
+        )
 
 
 def main():
