@@ -230,3 +230,52 @@ class VaultBatchFrontmatterUpdateInput(BaseModel):
             if "fields" not in item or not isinstance(item["fields"], dict):
                 raise ValueError(f"updates[{i}] must contain a 'fields' key with a dict value")
         return v
+
+
+class VaultSemanticSearchInput(BaseModel):
+    """Hybrid semantic + keyword search across the vault."""
+
+    model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
+
+    query: str = Field(
+        ...,
+        description="Natural language search query",
+        min_length=1,
+        max_length=500,
+    )
+    max_results: int = Field(
+        default=10,
+        ge=1,
+        le=MAX_SEARCH_RESULTS,
+        description="Maximum number of results to return",
+    )
+    min_score: float = Field(
+        default=0.3,
+        ge=0.0,
+        le=1.0,
+        description="Minimum relevance score threshold (0.0-1.0)",
+    )
+    filter_tags: list[str] | None = Field(
+        default=None,
+        description="Only include notes with all of these tags",
+    )
+    filter_folder: str = Field(
+        default="",
+        description="Restrict search to notes under this folder prefix",
+        max_length=500,
+    )
+    return_full_notes: bool = Field(
+        default=False,
+        description="Return full note content instead of matching chunks",
+    )
+
+
+class VaultReindexInput(BaseModel):
+    """Trigger reindexing of the semantic search index."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    full: bool = Field(
+        default=False,
+        description="Full rebuild (true) or incremental sync (false)",
+    )
