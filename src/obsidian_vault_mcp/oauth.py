@@ -237,20 +237,24 @@ async def oauth_register(request: Request) -> JSONResponse:
     """Dynamic client registration endpoint.
 
     Claude calls this during initial setup to register as an OAuth client.
-    Returns pre-configured credentials.
+    Returns a unique client_id and a per-registration client_secret.
+    The real VAULT_OAUTH_CLIENT_SECRET is never exposed — each registered
+    client gets an opaque token that is only useful for the authorization
+    code + PKCE flow (not for client_credentials).
     """
     try:
         body = await request.json()
     except Exception:
         body = {}
 
-    # Generate a unique client_id for this registration
     client_id = f"vault-mcp-{secrets.token_hex(8)}"
+    # Per-registration secret — not the server's real client secret
+    client_secret = secrets.token_urlsafe(32)
 
     return JSONResponse(
         {
             "client_id": client_id,
-            "client_secret": config.VAULT_OAUTH_CLIENT_SECRET,
+            "client_secret": client_secret,
             "client_name": body.get("client_name", "Obsidian Vault MCP Client"),
             "grant_types": ["authorization_code"],
             "response_types": ["code"],
