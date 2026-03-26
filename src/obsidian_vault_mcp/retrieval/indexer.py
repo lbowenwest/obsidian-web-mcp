@@ -52,10 +52,10 @@ class VaultIndexer:
     def __init__(self, embedder: Embedder, cache_path: Path | None = None) -> None:
         self._embedder = embedder
         self._cache_path = cache_path or config.SEMANTIC_CACHE_PATH
-        self._cache_path.mkdir(parents=True, exist_ok=True)
+        self._cache_path.mkdir(parents=True, exist_ok=True, mode=0o700)
 
         self._manifest_path = self._cache_path / "manifest.json"
-        self._bm25_path = self._cache_path / "bm25.pkl"
+        self._bm25_path = self._cache_path / "bm25.json"
         self._chroma_path = self._cache_path / "chroma"
 
         self._manifest: dict[str, str] = {}

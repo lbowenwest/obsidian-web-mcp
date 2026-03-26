@@ -1,7 +1,7 @@
 """BM25 index wrapper with serialization support."""
 
+import json
 import logging
-import pickle
 import threading
 from pathlib import Path
 
@@ -55,25 +55,23 @@ class BM25Index:
         return [(cid, float(s)) for cid, s in scored[:top_k] if s > 0]
 
     def save(self, path: Path) -> None:
-        """Serialize index to disk."""
+        """Serialize corpus to disk as JSON (safe, no pickle)."""
         with self._lock:
             data = {
-                "bm25": self._bm25,
                 "chunk_ids": self._chunk_ids,
                 "corpus_texts": self._corpus_texts,
             }
-        with open(path, "wb") as f:
-            pickle.dump(data, f)
+        with open(path, "w") as f:
+            json.dump(data, f)
 
     @classmethod
     def load(cls, path: Path) -> "BM25Index":
-        """Deserialize index from disk."""
-        with open(path, "rb") as f:
-            data = pickle.load(f)
+        """Deserialize corpus from disk and rebuild BM25 index."""
+        with open(path, "r") as f:
+            data = json.load(f)
         index = cls()
-        index._bm25 = data["bm25"]
-        index._chunk_ids = data["chunk_ids"]
-        index._corpus_texts = data["corpus_texts"]
+        corpus = list(zip(data["chunk_ids"], data["corpus_texts"]))
+        index.build(corpus)
         return index
 
     @property

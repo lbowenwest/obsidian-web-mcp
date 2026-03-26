@@ -12,6 +12,15 @@ from .search import reciprocal_rank_fusion, deduplicate_by_path
 logger = logging.getLogger(__name__)
 
 
+def _validate_filter_folder(filter_folder: str) -> str | None:
+    """Reject path traversal in filter_folder. Returns error message or None."""
+    if not filter_folder:
+        return None
+    if ".." in filter_folder or filter_folder.startswith("/"):
+        return "Invalid filter_folder: path traversal not allowed"
+    return None
+
+
 class RetrievalEngine:
     """Main interface for semantic search. Lazy-initializes on first use."""
 
@@ -63,6 +72,10 @@ class RetrievalEngine:
                 "error": f"Semantic search unavailable: {self._error_message}. Use vault_search for keyword search."
             })
 
+        folder_err = _validate_filter_folder(filter_folder)
+        if folder_err:
+            return json.dumps({"error": folder_err})
+
         try:
             from .indexer import CHUNK_ID_SEPARATOR
 
@@ -89,7 +102,6 @@ class RetrievalEngine:
 
             fused = [(cid, s) for cid, s in fused if s >= min_score]
 
-            # Attach path from chunk_id
             results_with_path = [
                 (cid, cid.rsplit(CHUNK_ID_SEPARATOR, 1)[0], score)
                 for cid, score in fused
@@ -103,7 +115,6 @@ class RetrievalEngine:
             if not results_with_path:
                 return json.dumps({"results": [], "total": 0})
 
-            # Batch retrieve all chunk data at once (avoids N+1)
             chunk_ids = [cid for cid, _, _ in results_with_path]
             chunk_data = self._indexer.get_chunks(chunk_ids)
 
@@ -141,7 +152,7 @@ class RetrievalEngine:
 
         except Exception as e:
             logger.error("Search error: %s", e, exc_info=True)
-            return json.dumps({"error": str(e)})
+            return json.dumps({"error": "Search failed"})
 
     def reindex(self, full: bool = False) -> str:
         """Trigger reindex. Returns JSON string with stats."""
@@ -166,7 +177,7 @@ class RetrievalEngine:
             return json.dumps(result.model_dump())
         except Exception as e:
             logger.error("Reindex error: %s", e, exc_info=True)
-            return json.dumps({"error": str(e)})
+            return json.dumps({"error": "Reindex failed"})
 
     def handle_file_change(self, changed_paths: list[str]) -> None:
         """Callback for FrontmatterIndex watchdog. Called from timer thread."""
