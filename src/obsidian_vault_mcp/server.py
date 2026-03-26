@@ -36,7 +36,8 @@ async def lifespan(server):
 mcp = FastMCP(
     "obsidian_web_mcp",
     stateless_http=True,
-    json_response=True,
+    # json_response=True,
+    streamable_http_path="/",
     lifespan=lifespan,
     transport_security=TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
@@ -45,7 +46,7 @@ mcp = FastMCP(
             "localhost:*",
             "[::1]:*",
             # Add your tunnel hostname here, e.g.:
-            # "vault-mcp.example.com",
+            "vault-mcp.tweakyllama.uk",
         ],
     ),
 )
