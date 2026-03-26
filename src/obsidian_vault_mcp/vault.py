@@ -1,13 +1,32 @@
 """Core filesystem operations for the Obsidian vault."""
 
 import fnmatch
+import json
 import os
 import shutil
 import tempfile
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from . import config
+
+
+def json_dumps(obj, **kwargs) -> str:
+    """json.dumps with support for date, datetime, and Path objects.
+
+    Use this instead of json.dumps() throughout the codebase to avoid
+    'Object of type date is not JSON serializable' errors from frontmatter
+    fields like `date: 2025-03-26` which python-frontmatter parses as
+    datetime.date objects.
+    """
+    def _default(o):
+        if isinstance(o, (date, datetime)):
+            return o.isoformat()
+        if isinstance(o, Path):
+            return str(o)
+        raise TypeError(f"Object of type {type(o).__name__} is not JSON serializable")
+
+    return json.dumps(obj, default=_default, **kwargs)
 
 
 def resolve_vault_path(relative_path: str) -> Path:

@@ -5,7 +5,7 @@ import logging
 import threading
 
 from .. import config
-from ..vault import read_file
+from ..vault import read_file, json_dumps
 from .models import SearchResult, ReindexResult
 from .search import reciprocal_rank_fusion, deduplicate_by_path
 
@@ -68,13 +68,13 @@ class RetrievalEngine:
         self._ensure_initialized()
 
         if not self._available:
-            return json.dumps({
+            return json_dumps({
                 "error": f"Semantic search unavailable: {self._error_message}. Use vault_search for keyword search."
             })
 
         folder_err = _validate_filter_folder(filter_folder)
         if folder_err:
-            return json.dumps({"error": folder_err})
+            return json_dumps({"error": folder_err})
 
         try:
             from .indexer import CHUNK_ID_SEPARATOR
@@ -113,7 +113,7 @@ class RetrievalEngine:
             results_with_path = results_with_path[:max_results]
 
             if not results_with_path:
-                return json.dumps({"results": [], "total": 0})
+                return json_dumps({"results": [], "total": 0})
 
             chunk_ids = [cid for cid, _, _ in results_with_path]
             chunk_data = self._indexer.get_chunks(chunk_ids)
@@ -148,18 +148,18 @@ class RetrievalEngine:
                     tags=tags,
                 ).model_dump())
 
-            return json.dumps({"results": search_results, "total": len(search_results)})
+            return json_dumps({"results": search_results, "total": len(search_results)})
 
         except Exception as e:
             logger.error("Search error: %s", e, exc_info=True)
-            return json.dumps({"error": "Search failed"})
+            return json_dumps({"error": "Search failed"})
 
     def reindex(self, full: bool = False) -> str:
         """Trigger reindex. Returns JSON string with stats."""
         self._ensure_initialized()
 
         if not self._available:
-            return json.dumps({
+            return json_dumps({
                 "error": f"Semantic search unavailable: {self._error_message}"
             })
 
@@ -174,10 +174,10 @@ class RetrievalEngine:
                     files_skipped=0,
                     duration_seconds=0,
                 )
-            return json.dumps(result.model_dump())
+            return json_dumps(result.model_dump())
         except Exception as e:
             logger.error("Reindex error: %s", e, exc_info=True)
-            return json.dumps({"error": "Reindex failed"})
+            return json_dumps({"error": "Reindex failed"})
 
     def handle_file_change(self, changed_paths: list[str]) -> None:
         """Callback for FrontmatterIndex watchdog. Called from timer thread."""

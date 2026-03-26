@@ -1,7 +1,8 @@
 """Semantic search tool for the vault MCP server."""
 
-import json
 import logging
+
+from ..vault import json_dumps
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +25,7 @@ def vault_semantic_search_impl(
 ) -> str:
     """Run hybrid semantic + keyword search. Returns JSON string."""
     if _engine is None:
-        return json.dumps({"error": "Semantic search is not available"})
+        return json_dumps({"error": "Semantic search is not available"})
 
     return _engine.search(
         query=query,

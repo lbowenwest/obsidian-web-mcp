@@ -1,7 +1,8 @@
 """Admin tools for the vault MCP server."""
 
-import json
 import logging
+
+from ..vault import json_dumps
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +18,6 @@ def set_engine(engine) -> None:
 def vault_reindex_impl(full: bool = False) -> str:
     """Trigger reindexing. Returns JSON string with stats."""
     if _engine is None:
-        return json.dumps({"error": "Semantic search is not available"})
+        return json_dumps({"error": "Semantic search is not available"})
 
     return _engine.reindex(full=full)
