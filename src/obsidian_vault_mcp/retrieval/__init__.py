@@ -45,15 +45,18 @@ class RetrievalEngine:
                 from .embeddings import SentenceTransformerEmbedder
                 from .indexer import VaultIndexer
 
+                logger.info("Loading embedding model...")
                 self._embedder = SentenceTransformerEmbedder()
+                logger.info("Creating vault indexer...")
                 self._indexer = VaultIndexer(self._embedder)
+                logger.info("Initializing index (may build on first run)...")
                 self._indexer.initialize()
                 self._initialized = True
-                logger.info("Retrieval engine initialized")
+                logger.info("Retrieval engine initialized (%d chunks indexed)", self._indexer.chunk_count())
             except Exception as e:
                 self._available = False
                 self._error_message = str(e)
-                logger.error("Failed to initialize retrieval engine: %s", e)
+                logger.error("Failed to initialize retrieval engine: %s", e, exc_info=True)
 
     def search(
         self,
@@ -79,7 +82,9 @@ class RetrievalEngine:
         try:
             from .indexer import CHUNK_ID_SEPARATOR
 
+            logger.info("Encoding query: %r", query[:100])
             query_embedding = self._embedder.encode([query])[0]
+            logger.debug("Query embedded, running hybrid search...")
             vector_results = self._indexer.vector_search(
                 query_embedding, n_results=3 * max_results,
                 filter_tags=filter_tags, filter_folder=filter_folder,
@@ -148,6 +153,8 @@ class RetrievalEngine:
                     tags=tags,
                 ).model_dump())
 
+            logger.info("Search returned %d results (vector=%d, bm25=%d, fused=%d)",
+                        len(search_results), len(vector_ranked), len(bm25_results), len(fused))
             return json_dumps({"results": search_results, "total": len(search_results)})
 
         except Exception as e:
